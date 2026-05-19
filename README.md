@@ -160,6 +160,84 @@ Sonnet, rough order-of-magnitude). Default `--limit-per-domain 15` produces
 20 meetings × ~6q/m capped at 15, Committee 6 meetings × ~12q/m), so budget
 ~$10 for a full run; pass `-y` to skip the confirmation prompt.
 
+### Pushing the score higher
+
+The first end-to-end run (N=24, Z.AI `glm-4.7`) landed at **ROUGE-Lsum F =
+0.3953** overall — top of the GPT-3 / Llama-2 follow-up band, comfortably
+above BART / HMNet baselines. The shape of the per-query metrics
+(**recall 0.81, precision 0.28**) is the key signal: the agent is finding the
+right material but emitting 2–3× more text than the gold answer (mean gold
+length ~35 words; the SOUL contract licenses 2–4 sentences plus citations).
+ROUGE is symmetric to length, so verbosity disproportionately punishes
+precision and drags F-measure down.
+
+Levers are ordered by **expected lift per unit of effort**. Tier 0 and Tier 1
+together are a ~30-LOC change that likely pushes the headline into the
+0.45–0.50 range.
+
+#### Tier 0 — Strip citations from agent output before scoring
+
+The `[meeting_id turns X–Y]` tokens the agent appends are real n-grams that
+don't exist in the gold answer, so they dilute precision without representing
+content difference. A 2-line regex in `scripts/run-benchmark.py` (before the
+`rouge.score(gold, response)` call) drops the citation tail. The agent still
+emits citations end-to-end — the benchmark just measures the content portion.
+
+Expected lift: **+0.03 to +0.06**. Measurement honesty, not gaming.
+
+#### Tier 1 — Tighten the SOUL answer-length contract
+
+Edit `agents/qmsum/SOUL.md` rule #4 to constrain specific-query answers
+harder — e.g. `"1–2 sentences, ≤45 words. Citations on a separate line
+AFTER the answer, never inline."` Gold answers average ~35 words; matching
+that distribution removes the structural precision tank.
+
+Expected lift: **+0.05 to +0.10** on precision, F-measure tracks. Combined
+with Tier 0: **+0.08 to +0.14**.
+
+#### Tier 2 — Per-meeting retrieval restriction
+
+QMSum specific queries are scoped to one meeting, but `search_memory`
+currently runs cross-meeting and pulls noise from the other ~14k events.
+The query preface already names the `meeting_id`; add a SOUL rule that
+binds `metadata_filter.meeting_id` on every retrieval, or add a thin
+agent skill that does it automatically.
+
+Expected lift: **+0.03 to +0.05**. Also makes retrieval failures legible —
+right now you can't tell why an answer was off.
+
+#### Tier 3 — Model upgrade
+
+Swap `[[agents.qmsum.providers]]` in `lobu.toml` to `claude-sonnet-4-6` or
+`claude-opus-4-7`. RAG-shaped benchmarks like QMSum don't dominate as hard
+as raw-reasoning benchmarks, but a frontier model typically adds **+0.03 to
++0.08**. Cost goes up ~10–30×; treat as a marketing-headline lever, not a
+default.
+
+#### Tier 4 — Larger sample for confidence
+
+`--limit-per-domain 1` gives N=24 with high per-query variance (σ on Lsum
+is ~0.15). Bump to `5` (N≈120) or `10` (N≈240) for a defensible σ. Doesn't
+change the score, locks the number in. Runtime scales linearly — budget
+~2 hours for N=240 at current per-query latency.
+
+#### Tier 5 — Hybrid retrieval (BM25 + vector)
+
+`search_memory` is vector-only. QMSum queries are often lexically
+distinctive ("structure of the belief net", "remote design constraints")
+and a Postgres `tsvector` GIN index over `payload_text` blended with the
+vector score typically lifts retrieval precision 5–15%. Heaviest item:
+touches the gateway tool, requires a schema migration, and needs scoring
+weights tuned per corpus. Defer unless QMSum becomes a recurring eval.
+
+#### Recommended order
+
+1. **Tier 0 + Tier 1 together** — 5 min of work, rerun N=24, target 0.48+.
+2. **Tier 4 bump to N=120** — overnight, locks the number in.
+3. **Tier 2** — only if Tier 0+1 still shows precision drag.
+4. Tier 3 is a separate "Lobu + Claude" headline run; Tier 5 is its own
+   project.
+
 ---
 
 ## Demo script (3 beats)
