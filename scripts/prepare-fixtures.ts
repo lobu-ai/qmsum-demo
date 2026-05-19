@@ -76,15 +76,38 @@ function parseFlags(argv: string[]): CliFlags {
   let limit = DEFAULT_LIMIT_PER_DOMAIN;
   let random = false;
   let seed = 1;
-  for (const arg of argv) {
-    if (arg.startsWith("--limit=")) {
-      const n = Number.parseInt(arg.slice("--limit=".length), 10);
-      if (Number.isFinite(n) && n > 0) limit = n;
-    } else if (arg === "--random") {
+
+  // Support both `--limit=N` / `--limit N` and `--seed=N` / `--seed N`.
+  const readValue = (i: number, name: string): { n: number; consumed: number } | null => {
+    const arg = argv[i] ?? "";
+    if (arg.startsWith(`${name}=`)) {
+      const n = Number.parseInt(arg.slice(name.length + 1), 10);
+      return Number.isFinite(n) ? { n, consumed: 1 } : null;
+    }
+    if (arg === name) {
+      const n = Number.parseInt(argv[i + 1] ?? "", 10);
+      return Number.isFinite(n) ? { n, consumed: 2 } : null;
+    }
+    return null;
+  };
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === "--random") {
       random = true;
-    } else if (arg.startsWith("--seed=")) {
-      const n = Number.parseInt(arg.slice("--seed=".length), 10);
-      if (Number.isFinite(n)) seed = n;
+      continue;
+    }
+    const lim = readValue(i, "--limit");
+    if (lim) {
+      if (lim.n > 0) limit = lim.n;
+      i += lim.consumed - 1;
+      continue;
+    }
+    const sd = readValue(i, "--seed");
+    if (sd) {
+      seed = sd.n;
+      i += sd.consumed - 1;
+      continue;
     }
   }
   return { limit, random, seed };
@@ -108,14 +131,6 @@ function shuffleInPlace<T>(arr: T[], rand: () => number): T[] {
     [arr[i]!, arr[j]!] = [arr[j]!, arr[i]!];
   }
   return arr;
-}
-
-function slugify(value: string): string {
-  return value
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 80);
 }
 
 function meetingIdFromPath(filePath: string): string {
@@ -357,9 +372,12 @@ function main(): void {
       }
     }
 
+    // --limit caps every per-domain list (specific/general/attribution/
+    // retrieval) so the documented "limit" stays honest. General and
+    // attribution still have their own natural caps below the default.
     specific.push(...domainSpecific.slice(0, flags.limit));
-    general.push(...domainGeneral.slice(0, PER_DOMAIN_GENERAL));
-    attribution.push(...domainAttrib.slice(0, PER_DOMAIN_ATTRIB));
+    general.push(...domainGeneral.slice(0, Math.min(flags.limit, PER_DOMAIN_GENERAL)));
+    attribution.push(...domainAttrib.slice(0, Math.min(flags.limit, PER_DOMAIN_ATTRIB)));
     retrieval.push(...domainRetrieval.slice(0, flags.limit));
   }
 

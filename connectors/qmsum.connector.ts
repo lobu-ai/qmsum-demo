@@ -380,7 +380,11 @@ export default class QmsumConnector extends ConnectorRuntime {
       const files = listJsonFiles(splitDir).slice(0, perDomainLimit);
       for (const filePath of files) {
         const meetingId = meetingIdFromPath(filePath);
-        const seenKey = `${domain}::${meetingId}`;
+        const sourceFileRel = relative(dataDir, filePath);
+        // Checkpoint key uses the relative source path (not meeting_id) so
+        // two QMSum files that share a canonical stem across splits/domains
+        // are independently tracked.
+        const seenKey = sourceFileRel;
         if (seen.has(seenKey)) continue;
 
         const data = safeReadJson(filePath);
@@ -390,7 +394,6 @@ export default class QmsumConnector extends ConnectorRuntime {
         const merged = mergeConsecutive(data.meeting_transcripts);
         if (merged.length === 0) continue;
 
-        const sourceFileRel = relative(dataDir, filePath);
         const meetingTitle = `${domain} — ${basename(filePath, ".json")}`;
         const scope = speakerScopeForDomain(domain);
 
@@ -408,7 +411,11 @@ export default class QmsumConnector extends ConnectorRuntime {
               : turn.text;
 
           events.push({
-            origin_id: `${meetingId}#${turn.startIdx}-${turn.endIdx}`,
+            // Prefix with the source file's relative path so two meetings
+            // with the same canonical stem under different domains/splits
+            // (or any future flattened mirror) still get unique origin_ids.
+            // metadata.meeting_id stays the canonical stem for citations.
+            origin_id: `${sourceFileRel}#${turn.startIdx}-${turn.endIdx}`,
             origin_type: "speaker_turn",
             semantic_type: "communication",
             title: `${turn.speaker} — ${meetingTitle} (turns ${turn.startIdx}–${turn.endIdx})`,
