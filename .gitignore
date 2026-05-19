@@ -24,6 +24,9 @@ data/
 # Promptfoo cache + run history
 .promptfoo/
 
+# pi (PR-review CLI) runtime artifacts
+.pi/
+
 # Editor / OS noise
 .DS_Store
 .vscode/

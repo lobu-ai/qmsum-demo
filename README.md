@@ -66,13 +66,19 @@ make clone-data                            # equivalent: git clone https://githu
 # 3. Boot Lobu locally (separate terminal — keep it running)
 lobu run                                   # gateway on http://localhost:8787
 
-# 4. Push the org / entities / connector definition to the gateway
+# 4. Push the org / entities / connector definition + register the feed.
+#    `lobu apply` writes the `qmsum-transcripts` connection + `transcripts`
+#    feed and schedules the first sync — the gateway worker picks it up
+#    automatically. The feed schedule is `0 0 1 1 0` (Jan 1, effectively
+#    once-yearly) because `cron-parser` has no `@once` macro; for ad-hoc
+#    re-ingestion use the admin dashboard's `trigger_feed` action on the
+#    `transcripts` feed.
+#
+#    Smoke-test the connector locally without persisting events:
+#      lobu connector run qmsum --check
 lobu apply
 
-# 5. Ingest QMSum into Lobu memory (one-shot — schedule: "@once")
-lobu connector run qmsum-transcripts
-
-# 6. Sample fixtures + run promptfoo evals
+# 5. Sample fixtures + run promptfoo evals
 export LOBU_TOKEN=$(lobu token)
 bun run prepare-fixtures                   # writes .eval-fixtures/{specific,general,attribution,cross-meeting}.jsonl
 bun run evals                              # runs the 5 scenarios in agents/qmsum/evals/promptfooconfig.yaml

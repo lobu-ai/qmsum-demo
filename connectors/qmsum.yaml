@@ -5,21 +5,25 @@
 # merges consecutive same-speaker turns into one event each, and emits per-
 # domain speaker identities according to the rules in models/schema.yaml.
 #
-# `schedule: "@once"` because the QMSum dataset is static — re-run with
-# `lobu connector run qmsum-transcripts` if you change `per_domain_limit`.
+# Schedule is a once-a-year cron (Jan 1 at 00:00 on Sunday) — `cron-parser`
+# has no `@once` macro, so this is the closest "effectively manual" cron the
+# server will accept. QMSum is a static dataset; if you bump
+# `per_domain_limit`, re-apply and trigger the sync from the dashboard
+# (admin `trigger_feed` action) rather than waiting for the schedule.
+#
+# `data_dir` / `per_domain_limit` live only on the feed — the server rejects
+# feed-scoped keys at connection-level with "Feed-scoped config belongs on
+# feeds." (see splitConfigByFeedScope in packages/server).
 ---
 version: 1
 type: connection
 slug: qmsum-transcripts
 connector: qmsum
 name: QMSum meeting transcripts
-config:
-  data_dir: "./data/qmsum/data"
-  per_domain_limit: 10
 feeds:
   - feed: transcripts
     name: Meeting transcripts
-    schedule: "@once"
+    schedule: "0 0 1 1 0"
     config:
       data_dir: "./data/qmsum/data"
       per_domain_limit: 10

@@ -207,15 +207,12 @@ function topicSlugFor(
   return undefined;
 }
 
-function meetingIdFromPath(
-  domain: Domain,
-  split: string | null,
-  filePath: string
-): string {
-  const file = basename(filePath, ".json");
-  // Encode domain + (split, if known) + filename so per-meeting ids stay
-  // unique even if QMSum reuses a stem across splits.
-  return slugify(`${domain}-${split ?? "root"}-${file}`);
+function meetingIdFromPath(filePath: string): string {
+  // Canonical QMSum filename without extension (e.g. "Bed003", "ES2004a",
+  // "covid_4"). The agent's SOUL.md citation contract — `[meeting_id turns
+  // X–Y]` — expects exactly this form, and prepare-fixtures.ts emits the
+  // same string, so retrieval round-trips.
+  return basename(filePath, ".json");
 }
 
 // ─── Connector class ───────────────────────────────────────────────────────
@@ -348,13 +345,14 @@ export default class QmsumConnector extends ConnectorRuntime {
         },
       },
     },
+    // Connection-level options are empty — `data_dir` and `per_domain_limit`
+    // live on the `transcripts` feed's `configSchema`. The server's
+    // `splitConfigByFeedScope` rejects connection-level config whose keys
+    // overlap any feed's `configSchema` with the error "Feed-scoped config
+    // belongs on feeds."
     optionsSchema: {
       type: "object",
-      required: ["data_dir"],
-      properties: {
-        data_dir: { type: "string" },
-        per_domain_limit: { type: "integer", minimum: 1 },
-      },
+      properties: {},
     },
   };
 
@@ -379,13 +377,15 @@ export default class QmsumConnector extends ConnectorRuntime {
       const domainDir = join(dataDir, domain);
       const splitDir = pickSplitDir(domainDir);
       if (!splitDir) continue;
-      const splitLabel =
-        splitDir === domainDir ? null : basename(splitDir);
 
       const files = listJsonFiles(splitDir).slice(0, perDomainLimit);
       for (const filePath of files) {
-        const meetingId = meetingIdFromPath(domain, splitLabel, filePath);
-        const seenKey = `${domain}::${meetingId}`;
+        const meetingId = meetingIdFromPath(filePath);
+        const sourceFileRel = relative(dataDir, filePath);
+        // Checkpoint key uses the relative source path (not meeting_id) so
+        // two QMSum files that share a canonical stem across splits/domains
+        // are independently tracked.
+        const seenKey = sourceFileRel;
         if (seen.has(seenKey)) continue;
 
         const data = safeReadJson(filePath);
@@ -395,7 +395,6 @@ export default class QmsumConnector extends ConnectorRuntime {
         const merged = mergeConsecutive(data.meeting_transcripts);
         if (merged.length === 0) continue;
 
-        const sourceFileRel = relative(dataDir, filePath);
         const meetingTitle = `${domain} — ${basename(filePath, ".json")}`;
         const scope = speakerScopeForDomain(domain);
 
@@ -413,7 +412,11 @@ export default class QmsumConnector extends ConnectorRuntime {
               : turn.text;
 
           events.push({
-            origin_id: `${meetingId}#${turn.startIdx}-${turn.endIdx}`,
+            // Prefix with the source file's relative path so two meetings
+            // with the same canonical stem under different domains/splits
+            // (or any future flattened mirror) still get unique origin_ids.
+            // metadata.meeting_id stays the canonical stem for citations.
+            origin_id: `${sourceFileRel}#${turn.startIdx}-${turn.endIdx}`,
             origin_type: "speaker_turn",
             semantic_type: "communication",
             title: `${turn.speaker} — ${meetingTitle} (turns ${turn.startIdx}–${turn.endIdx})`,
