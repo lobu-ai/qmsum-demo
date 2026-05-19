@@ -1,0 +1,32 @@
+[
+  {
+    "description": "cross-meeting — AMI Product positioning evolution",
+    "domain": "Product",
+    "query": "Across the AMI Product design meetings, how did Marketing's positioning argument evolve between the kickoff and the final design meeting?",
+    "gold_answer": "Marketing started by anchoring on a high-end consumer segment and the role of a fashionable look; by the conceptual / detailed design meetings, the argument had shifted to balance branding against the cost ceiling the Project Manager kept reasserting. The agent should retrieve from at least two distinct Product meetings and cite both."
+  },
+  {
+    "description": "cross-meeting — AMI Product cost consistency",
+    "domain": "Product",
+    "query": "Compare how cost was treated in two different AMI Product meetings — was the Project Manager consistent across them?",
+    "gold_answer": "The Project Manager consistently anchored the team to the 12.50-euro / 25-euro retail target, but the framing changed: in earlier meetings cost was a top-line constraint, in later ones it became a trade-off against feature scope (LCD vs LEDs, advanced chip vs simple). Answer should cite two Product meetings."
+  },
+  {
+    "description": "cross-meeting — Committee mental health across hearings",
+    "domain": "Committee",
+    "query": "In the Welsh Senedd committee sessions, how did the topic of mental health support for young people surface across more than one hearing?",
+    "gold_answer": "Multiple Committee sessions returned to mental-health access — covering CAMHS waiting lists, school-based counselling, and the role of third-sector providers. The agent must cite at least two Committee meeting ids."
+  },
+  {
+    "description": "cross-meeting — Academic evaluation disagreements",
+    "domain": "Academic",
+    "query": "Across two Academic group meetings, what disagreements came up about evaluation methodology?",
+    "gold_answer": "Academic meetings repeatedly debated evaluation methodology — whether a held-out test set was sufficient, whether the group's metrics matched the downstream task, and whether automatic metrics agreed with human judgements. Per-meeting speaker labels mean the same 'Grad A' across files is NOT the same person; the agent should make that explicit."
+  },
+  {
+    "description": "cross-meeting — AMI Product action-item closure",
+    "domain": "Product",
+    "query": "Synthesize action items across two AMI Product meetings: what was deferred to the next meeting and what was closed out?",
+    "gold_answer": "Action items typically closed within a meeting include role-allocation and immediate sketch tasks; deferrals usually involve cost-confirmation, supplier-spec checks, and user-study scheduling. Answer must cite at least two Product meetings and distinguish closed vs deferred."
+  }
+]

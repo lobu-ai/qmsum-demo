@@ -207,15 +207,12 @@ function topicSlugFor(
   return undefined;
 }
 
-function meetingIdFromPath(
-  domain: Domain,
-  split: string | null,
-  filePath: string
-): string {
-  const file = basename(filePath, ".json");
-  // Encode domain + (split, if known) + filename so per-meeting ids stay
-  // unique even if QMSum reuses a stem across splits.
-  return slugify(`${domain}-${split ?? "root"}-${file}`);
+function meetingIdFromPath(filePath: string): string {
+  // Canonical QMSum filename without extension (e.g. "Bed003", "ES2004a",
+  // "covid_4"). The agent's SOUL.md citation contract — `[meeting_id turns
+  // X–Y]` — expects exactly this form, and prepare-fixtures.ts emits the
+  // same string, so retrieval round-trips.
+  return basename(filePath, ".json");
 }
 
 // ─── Connector class ───────────────────────────────────────────────────────
@@ -379,12 +376,10 @@ export default class QmsumConnector extends ConnectorRuntime {
       const domainDir = join(dataDir, domain);
       const splitDir = pickSplitDir(domainDir);
       if (!splitDir) continue;
-      const splitLabel =
-        splitDir === domainDir ? null : basename(splitDir);
 
       const files = listJsonFiles(splitDir).slice(0, perDomainLimit);
       for (const filePath of files) {
-        const meetingId = meetingIdFromPath(domain, splitLabel, filePath);
+        const meetingId = meetingIdFromPath(filePath);
         const seenKey = `${domain}::${meetingId}`;
         if (seen.has(seenKey)) continue;
 

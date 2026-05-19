@@ -2,24 +2,28 @@
  * Samples QMSum and emits four JSONL fixture files under .eval-fixtures/:
  *
  *   - specific.jsonl       — specific_query_list with gold answers + gold spans
- *                            (also carries the retrieval-recall asserts)
+ *                            (answer-quality llm-rubric)
  *   - general.jsonl        — general_query_list with gold summaries
  *   - attribution.jsonl    — specific queries where a speaker label is named
  *   - cross-meeting.jsonl  — hand-authored, ~5 rows that synthesize across two meetings
+ *   - retrieval-recall.jsonl — same vars as specific.jsonl with retrieval asserts
  *
- * Each row is a promptfoo TestCase: { vars, assert, description }. promptfoo
- * picks up the JSONL files via the top-level `tests:` array in the
- * promptfooconfig.yaml. We embed asserts in the row (rather than in
- * `scenarios:`) because promptfoo's `scenarios` schema doesn't accept
- * file:// JSONL refs — it expects fully-materialized test arrays.
+ * Why retrieval-recall duplicates specific.jsonl's vars: promptfoo's top-level
+ * `tests:` accepts file://jsonl entries but every row in the JSONL is parsed
+ * as a TestCaseSchema (i.e. its own `assert` block), and `scenarios:` rejects
+ * file:// refs entirely. There's no shape in the v0.121 config schema that
+ * lets us bind two different `assert` blocks to one file. Re-emit it.
  *
- * Stratified across the three QMSum domains (Academic / Product / Committee).
  * Reads from data/qmsum/data/{domain}/(test|val|train)/*.json, preferring
  * test split, falling back to val then train. Gold spans (the original
  * relevant_text_span pairs from QMSum) ride along on each specific row so
  * the turn-overlap.js judge can score retrieval against ground truth.
  *
- * Run with: bun run scripts/prepare-fixtures.ts
+ * Sampling is deterministic first-N per domain (sorted filenames) for
+ * reproducibility. Pass --random with --seed=N to randomize. --limit N
+ * overrides the per-domain cap.
+ *
+ * Run with: bun run scripts/prepare-fixtures.ts [--limit N] [--random] [--seed N]
  */
 
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
@@ -48,17 +52,62 @@ type Domain = (typeof DOMAINS)[number];
 
 const SPLIT_PREFERENCE = ["test", "val", "train"] as const;
 
-const PER_DOMAIN_SPECIFIC = 15;
+const DEFAULT_LIMIT_PER_DOMAIN = 15;
 const PER_DOMAIN_GENERAL = 10;
 const PER_DOMAIN_ATTRIB = 5;
 
 const DATA_DIR = resolve(process.env.QMSUM_DATA_DIR ?? "./data/qmsum/data");
 const OUT_DIR = resolve(".eval-fixtures");
+const CROSS_MEETING_CASES = resolve("agents/qmsum/evals/cross-meeting-cases.json");
 
 interface PromptfooTestRow {
   description?: string;
   vars: Record<string, unknown>;
   assert: Array<Record<string, unknown>>;
+}
+
+interface CliFlags {
+  limit: number;
+  random: boolean;
+  seed: number;
+}
+
+function parseFlags(argv: string[]): CliFlags {
+  let limit = DEFAULT_LIMIT_PER_DOMAIN;
+  let random = false;
+  let seed = 1;
+  for (const arg of argv) {
+    if (arg.startsWith("--limit=")) {
+      const n = Number.parseInt(arg.slice("--limit=".length), 10);
+      if (Number.isFinite(n) && n > 0) limit = n;
+    } else if (arg === "--random") {
+      random = true;
+    } else if (arg.startsWith("--seed=")) {
+      const n = Number.parseInt(arg.slice("--seed=".length), 10);
+      if (Number.isFinite(n)) seed = n;
+    }
+  }
+  return { limit, random, seed };
+}
+
+// Mulberry32 — deterministic PRNG seeded by `--seed`.
+function mulberry32(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function shuffleInPlace<T>(arr: T[], rand: () => number): T[] {
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(rand() * (i + 1));
+    [arr[i]!, arr[j]!] = [arr[j]!, arr[i]!];
+  }
+  return arr;
 }
 
 function slugify(value: string): string {
@@ -69,9 +118,12 @@ function slugify(value: string): string {
     .slice(0, 80);
 }
 
-function meetingIdFromPath(domain: Domain, split: string | null, filePath: string): string {
-  const file = basename(filePath, ".json");
-  return slugify(`${domain}-${split ?? "root"}-${file}`);
+function meetingIdFromPath(filePath: string): string {
+  // Canonical QMSum filename without extension (e.g. "Bed003", "ES2004a",
+  // "covid_4"). The agent's SOUL.md citation contract — `[meeting_id turns
+  // X–Y]` — expects exactly this form, and the connector emits the same
+  // string in event metadata, so they round-trip.
+  return basename(filePath, ".json");
 }
 
 function listJsonFiles(dir: string): string[] {
@@ -136,51 +188,24 @@ function findSpeakerInQuery(query: string, transcripts: QmsumTurn[]): string | n
   return null;
 }
 
-function takeStratified<T>(rows: T[], perDomainCap: number): T[] {
-  return rows.slice(0, perDomainCap);
-}
-
 function writeJsonl(file: string, rows: PromptfooTestRow[]): void {
   const lines = rows.map((row) => JSON.stringify(row)).join("\n");
   writeFileSync(file, lines + (rows.length > 0 ? "\n" : ""), "utf8");
 }
 
-// ─── Per-scenario assert factories ─────────────────────────────────────
-
-function specificAsserts(): Array<Record<string, unknown>> {
-  return [
-    {
-      type: "llm-rubric",
-      value:
-        "The answer addresses {{query}} and aligns factually with the gold answer below. " +
-        "Phrasing may vary. The response cites at least one `[meeting_id turns X–Y]` " +
-        "reference and does NOT speculate beyond the transcript.\n\nGold answer:\n{{gold_answer}}",
-    },
-  ];
-}
-
-function generalAsserts(): Array<Record<string, unknown>> {
-  return [
-    {
-      type: "llm-rubric",
-      value:
-        "A faithful ~150-word summary of meeting {{meeting_id}} covering decisions, " +
-        "open questions, and topics raised. Cites at least two `[meeting_id turns X–Y]` " +
-        "ranges. Aligned with the gold summary:\n\n{{gold_answer}}",
-    },
-    { type: "answer-relevance", threshold: 0.6 },
-  ];
-}
-
-function attributionAsserts(): Array<Record<string, unknown>> {
-  return [
-    { type: "icontains", value: "{{expected_speaker}}" },
-    { type: "icontains", value: "{{meeting_id}}" },
-  ];
-}
-
-function crossMeetingAsserts(): Array<Record<string, unknown>> {
-  return [
+function loadCrossMeetingRows(): PromptfooTestRow[] {
+  if (!existsSync(CROSS_MEETING_CASES)) {
+    console.warn(`prepare-fixtures: cross-meeting cases not found at ${CROSS_MEETING_CASES}`);
+    return [];
+  }
+  const raw = readFileSync(CROSS_MEETING_CASES, "utf8");
+  const parsed = JSON.parse(raw) as Array<{
+    description: string;
+    query: string;
+    gold_answer: string;
+    domain: Domain;
+  }>;
+  const assert = [
     {
       type: "llm-rubric",
       value:
@@ -189,28 +214,18 @@ function crossMeetingAsserts(): Array<Record<string, unknown>> {
         "form. Grounded only in the QMSum transcripts. Expected coverage:\n\n{{gold_answer}}",
     },
   ];
-}
-
-function retrievalAsserts(): Array<Record<string, unknown>> {
-  return [
-    { type: "javascript", value: "file://judges/turn-overlap.js" },
-    {
-      type: "context-recall",
-      contextTransform: "metadata.retrievedContext",
-      threshold: 0.5,
-      value: "{{gold_answer}}",
-    },
-    {
-      type: "context-faithfulness",
-      contextTransform: "metadata.retrievedContext",
-      threshold: 0.6,
-    },
-  ];
+  return parsed.map((c) => ({
+    description: c.description,
+    vars: { query: c.query, gold_answer: c.gold_answer, domain: c.domain },
+    assert,
+  }));
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────
 
 function main(): void {
+  const flags = parseFlags(process.argv.slice(2));
+
   if (!existsSync(DATA_DIR)) {
     console.error(
       `prepare-fixtures: QMSum data dir not found at ${DATA_DIR}. ` +
@@ -226,6 +241,8 @@ function main(): void {
   const attribution: PromptfooTestRow[] = [];
   const retrieval: PromptfooTestRow[] = [];
 
+  const rand = flags.random ? mulberry32(flags.seed) : null;
+
   for (const domain of DOMAINS) {
     const domainDir = join(DATA_DIR, domain);
     const split = pickSplit(domainDir);
@@ -234,7 +251,8 @@ function main(): void {
       continue;
     }
 
-    const files = listJsonFiles(split.dir);
+    let files = listJsonFiles(split.dir);
+    if (rand) files = shuffleInPlace([...files], rand);
     const domainSpecific: PromptfooTestRow[] = [];
     const domainGeneral: PromptfooTestRow[] = [];
     const domainAttrib: PromptfooTestRow[] = [];
@@ -249,7 +267,7 @@ function main(): void {
       }
       if (!Array.isArray(parsed.meeting_transcripts)) continue;
 
-      const meetingId = meetingIdFromPath(domain, split.label, filePath);
+      const meetingId = meetingIdFromPath(filePath);
 
       for (const row of parsed.specific_query_list ?? []) {
         if (!row?.query || !row?.answer) continue;
@@ -259,17 +277,39 @@ function main(): void {
           gold_answer: row.answer,
           meeting_id: meetingId,
           domain,
+          split: split.label,
           gold_spans: goldSpans,
         };
         domainSpecific.push({
           description: `answer-quality — ${meetingId}`,
           vars,
-          assert: specificAsserts(),
+          assert: [
+            {
+              type: "llm-rubric",
+              value:
+                "The answer addresses {{query}} and aligns factually with the gold answer below. " +
+                "Phrasing may vary. The response cites at least one `[meeting_id turns X–Y]` " +
+                "reference and does NOT speculate beyond the transcript.\n\nGold answer:\n{{gold_answer}}",
+            },
+          ],
         });
         domainRetrieval.push({
           description: `retrieval-recall — ${meetingId}`,
           vars,
-          assert: retrievalAsserts(),
+          assert: [
+            { type: "javascript", value: "file://judges/turn-overlap.js" },
+            {
+              type: "context-recall",
+              contextTransform: "metadata.retrievedContext",
+              threshold: 0.5,
+              value: "{{gold_answer}}",
+            },
+            {
+              type: "context-faithfulness",
+              contextTransform: "metadata.retrievedContext",
+              threshold: 0.6,
+            },
+          ],
         });
 
         const speaker = findSpeakerInQuery(row.query, parsed.meeting_transcripts);
@@ -282,8 +322,12 @@ function main(): void {
               expected_speaker: speaker,
               meeting_id: meetingId,
               domain,
+              split: split.label,
             },
-            assert: attributionAsserts(),
+            assert: [
+              { type: "icontains", value: "{{expected_speaker}}" },
+              { type: "icontains", value: "{{meeting_id}}" },
+            ],
           });
         }
       }
@@ -297,16 +341,26 @@ function main(): void {
             gold_answer: row.answer,
             meeting_id: meetingId,
             domain,
+            split: split.label,
           },
-          assert: generalAsserts(),
+          assert: [
+            {
+              type: "llm-rubric",
+              value:
+                "A faithful ~150-word summary of meeting {{meeting_id}} covering decisions, " +
+                "open questions, and topics raised. Cites at least two `[meeting_id turns X–Y]` " +
+                "ranges. Aligned with the gold summary:\n\n{{gold_answer}}",
+            },
+            { type: "answer-relevance", threshold: 0.6 },
+          ],
         });
       }
     }
 
-    specific.push(...takeStratified(domainSpecific, PER_DOMAIN_SPECIFIC));
-    general.push(...takeStratified(domainGeneral, PER_DOMAIN_GENERAL));
-    attribution.push(...takeStratified(domainAttrib, PER_DOMAIN_ATTRIB));
-    retrieval.push(...takeStratified(domainRetrieval, PER_DOMAIN_SPECIFIC));
+    specific.push(...domainSpecific.slice(0, flags.limit));
+    general.push(...domainGeneral.slice(0, PER_DOMAIN_GENERAL));
+    attribution.push(...domainAttrib.slice(0, PER_DOMAIN_ATTRIB));
+    retrieval.push(...domainRetrieval.slice(0, flags.limit));
   }
 
   writeJsonl(join(OUT_DIR, "specific.jsonl"), specific);
@@ -314,70 +368,11 @@ function main(): void {
   writeJsonl(join(OUT_DIR, "attribution.jsonl"), attribution);
   writeJsonl(join(OUT_DIR, "retrieval-recall.jsonl"), retrieval);
 
-  // Cross-meeting fixtures are hand-authored — the QMSum dataset doesn't
-  // contain queries that span meetings. These five rows are deliberately
-  // domain-flavored so they exercise the agent's per-domain speaker rules.
-  const crossMeeting: PromptfooTestRow[] = [
-    {
-      description: "cross-meeting — AMI Product positioning evolution",
-      vars: {
-        query:
-          "Across the AMI Product design meetings, how did Marketing's positioning argument evolve between the kickoff and the final design meeting?",
-        gold_answer:
-          "Marketing started by anchoring on a high-end consumer segment and the role of a fashionable look; by the conceptual / detailed design meetings, the argument had shifted to balance branding against the cost ceiling the Project Manager kept reasserting. The agent should retrieve from at least two distinct Product meetings and cite both.",
-        domain: "Product",
-      },
-      assert: crossMeetingAsserts(),
-    },
-    {
-      description: "cross-meeting — AMI Product cost consistency",
-      vars: {
-        query:
-          "Compare how cost was treated in two different AMI Product meetings — was the Project Manager consistent across them?",
-        gold_answer:
-          "The Project Manager consistently anchored the team to the 12.50-euro / 25-euro retail target, but the framing changed: in earlier meetings cost was a top-line constraint, in later ones it became a trade-off against feature scope (LCD vs LEDs, advanced chip vs simple). Answer should cite two Product meetings.",
-        domain: "Product",
-      },
-      assert: crossMeetingAsserts(),
-    },
-    {
-      description: "cross-meeting — Committee mental health across hearings",
-      vars: {
-        query:
-          "In the Welsh Senedd committee sessions, how did the topic of mental health support for young people surface across more than one hearing?",
-        gold_answer:
-          "Multiple Committee sessions returned to mental-health access — covering CAMHS waiting lists, school-based counselling, and the role of third-sector providers. The agent must cite at least two Committee meeting ids.",
-        domain: "Committee",
-      },
-      assert: crossMeetingAsserts(),
-    },
-    {
-      description: "cross-meeting — Academic evaluation disagreements",
-      vars: {
-        query:
-          "Across two Academic group meetings, what disagreements came up about evaluation methodology?",
-        gold_answer:
-          "Academic meetings repeatedly debated evaluation methodology — whether a held-out test set was sufficient, whether the group's metrics matched the downstream task, and whether automatic metrics agreed with human judgements. Per-meeting speaker labels mean the same 'Grad A' across files is NOT the same person; the agent should make that explicit.",
-        domain: "Academic",
-      },
-      assert: crossMeetingAsserts(),
-    },
-    {
-      description: "cross-meeting — AMI Product action-item closure",
-      vars: {
-        query:
-          "Synthesize action items across two AMI Product meetings: what was deferred to the next meeting and what was closed out?",
-        gold_answer:
-          "Action items typically closed within a meeting include role-allocation and immediate sketch tasks; deferrals usually involve cost-confirmation, supplier-spec checks, and user-study scheduling. Answer must cite at least two Product meetings and distinguish closed vs deferred.",
-        domain: "Product",
-      },
-      assert: crossMeetingAsserts(),
-    },
-  ];
-
+  const crossMeeting = loadCrossMeetingRows();
   writeJsonl(join(OUT_DIR, "cross-meeting.jsonl"), crossMeeting);
 
-  console.log("prepare-fixtures: wrote fixtures to", OUT_DIR);
+  const mode = flags.random ? `random (seed=${flags.seed})` : "deterministic first-N";
+  console.log(`prepare-fixtures: wrote fixtures to ${OUT_DIR} (${mode}, limit=${flags.limit})`);
   console.log("  specific.jsonl         ", specific.length);
   console.log("  general.jsonl          ", general.length);
   console.log("  attribution.jsonl      ", attribution.length);

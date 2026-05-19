@@ -11,7 +11,7 @@ entities:
       properties:
         meeting_id:
           type: string
-          description: Stable id derived from the source filename (e.g. "Academic_AMI_ES2002a").
+          description: Canonical QMSum filename without extension (e.g. "ES2002a", "Bed003", "covid_4").
           x-table-label: Meeting ID
           x-table-column: true
         domain:
