@@ -345,13 +345,14 @@ export default class QmsumConnector extends ConnectorRuntime {
         },
       },
     },
+    // Connection-level options are empty — `data_dir` and `per_domain_limit`
+    // live on the `transcripts` feed's `configSchema`. The server's
+    // `splitConfigByFeedScope` rejects connection-level config whose keys
+    // overlap any feed's `configSchema` with the error "Feed-scoped config
+    // belongs on feeds."
     optionsSchema: {
       type: "object",
-      required: ["data_dir"],
-      properties: {
-        data_dir: { type: "string" },
-        per_domain_limit: { type: "integer", minimum: 1 },
-      },
+      properties: {},
     },
   };
 
