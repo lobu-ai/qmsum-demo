@@ -1,0 +1,25 @@
+# QMSum meeting-transcript connection — backed by ./qmsum.connector.ts.
+#
+# A single `transcripts` feed walks data/qmsum/data/{Academic,Product,Committee}/
+# (using the first non-empty split per domain, preferring test → val → train),
+# merges consecutive same-speaker turns into one event each, and emits per-
+# domain speaker identities according to the rules in models/schema.yaml.
+#
+# `schedule: "@once"` because the QMSum dataset is static — re-run with
+# `lobu connector run qmsum-transcripts` if you change `per_domain_limit`.
+---
+version: 1
+type: connection
+slug: qmsum-transcripts
+connector: qmsum
+name: QMSum meeting transcripts
+config:
+  data_dir: "./data/qmsum/data"
+  per_domain_limit: 10
+feeds:
+  - feed: transcripts
+    name: Meeting transcripts
+    schedule: "@once"
+    config:
+      data_dir: "./data/qmsum/data"
+      per_domain_limit: 10
