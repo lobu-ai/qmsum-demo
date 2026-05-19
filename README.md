@@ -49,7 +49,12 @@ retrieval against the gold `relevant_text_span` annotations).
 - **Bun** — `curl -fsSL https://bun.sh/install | bash`.
 - **Postgres with `pgvector`** — `DATABASE_URL=postgres://…`.
 - **`@lobu/cli`** — `npm i -g @lobu/cli`.
-- **QMSum dataset** — `git clone https://github.com/Yale-LILY/QMSum.git data/qmsum`.
+- **QMSum dataset** — **not required for ingestion.** The connector
+  self-fetches the corpus from GitHub via
+  [`fileSystemSourceFromUri`](https://www.npmjs.com/package/@lobu/connector-sdk)
+  on first sync (shallow clone into `${WORKSPACE_DIR}/.lobu-cache/`,
+  ~5s over network). A local clone is only needed for the optional
+  promptfoo fixtures pipeline — see `make clone-data`.
 
 ---
 
@@ -60,23 +65,29 @@ retrieval against the gold `relevant_text_span` annotations).
 cp .env.example .env                       # fill ANTHROPIC_API_KEY, DATABASE_URL, ENCRYPTION_KEY (openssl rand -hex 32)
 bun install
 
-# 2. Clone the QMSum dataset (gitignored — never committed)
-make clone-data                            # equivalent: git clone https://github.com/Yale-LILY/QMSum.git data/qmsum
-
-# 3. Boot Lobu locally (separate terminal — keep it running)
+# 2. Boot Lobu locally (separate terminal — keep it running)
 lobu run                                   # gateway on http://localhost:8787
 
-# 4. Push the org / entities / connector definition + register the feed.
+# 3. Push the org / entities / connector definition + register the feed.
 #    `lobu apply` writes the `qmsum-transcripts` connection + `transcripts`
 #    feed and schedules the first sync — the gateway worker picks it up
-#    automatically. The feed schedule is `0 0 1 1 0` (Jan 1, effectively
-#    once-yearly) because `cron-parser` has no `@once` macro; for ad-hoc
-#    re-ingestion use the admin dashboard's `trigger_feed` action on the
-#    `transcripts` feed.
+#    automatically. The connector self-fetches the QMSum corpus into
+#    `${WORKSPACE_DIR}/.lobu-cache/` on first run (~5s shallow clone over
+#    network). No manual `git clone` required.
+#
+#    The feed schedule is `0 0 1 1 0` (Jan 1, effectively once-yearly)
+#    because `cron-parser` has no `@once` macro; for ad-hoc re-ingestion
+#    use the admin dashboard's `trigger_feed` action on the `transcripts`
+#    feed.
 #
 #    Smoke-test the connector locally without persisting events:
 #      lobu connector run qmsum --check
 lobu apply
+
+# 4. (Optional — only for the promptfoo eval pipeline.)
+#    Clone QMSum locally so `scripts/prepare-fixtures.ts` can sample gold
+#    answers + spans. Not needed for connector ingestion.
+make clone-data                            # equivalent: git clone https://github.com/Yale-LILY/QMSum.git data/qmsum
 
 # 5. Sample fixtures + run promptfoo evals
 export LOBU_TOKEN=$(lobu token)

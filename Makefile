@@ -6,7 +6,7 @@
 help:
 	@echo "Targets:"
 	@echo "  install     — bun install"
-	@echo "  clone-data  — git clone Yale-LILY/QMSum into ./data/qmsum"
+	@echo "  clone-data  — git clone Yale-LILY/QMSum into ./data/qmsum (eval fixtures only — the connector self-fetches)"
 	@echo "  apply       — lobu apply (creates org + entities + connector definition)"
 	@echo "  sync        — lobu connector run qmsum-transcripts (ingests transcripts)"
 	@echo "  fixtures    — bun run scripts/prepare-fixtures.ts (writes .eval-fixtures/*.jsonl)"

@@ -1,6 +1,11 @@
 # QMSum meeting-transcript connection — backed by ./qmsum.connector.ts.
 #
-# A single `transcripts` feed walks data/qmsum/data/{Academic,Product,Committee}/
+# Self-sufficient: the connector fetches the Yale-LILY QMSum corpus directly
+# from GitHub via @lobu/connector-sdk's FileSystemSource primitive on first
+# sync. No manual `git clone` is required — a shallow cache lives under
+# `${WORKSPACE_DIR}/.lobu-cache/sources/` and is reused across syncs.
+#
+# A single `transcripts` feed walks data/{Academic,Product,Committee}/
 # (using the first non-empty split per domain, preferring test → val → train),
 # merges consecutive same-speaker turns into one event each, and emits per-
 # domain speaker identities according to the rules in models/schema.yaml.
@@ -11,7 +16,7 @@
 # `per_domain_limit`, re-apply and trigger the sync from the dashboard
 # (admin `trigger_feed` action) rather than waiting for the schedule.
 #
-# `data_dir` / `per_domain_limit` live only on the feed — the server rejects
+# `per_domain_limit` lives only on the feed — the server rejects
 # feed-scoped keys at connection-level with "Feed-scoped config belongs on
 # feeds." (see splitConfigByFeedScope in packages/server).
 ---
@@ -25,5 +30,4 @@ feeds:
     name: Meeting transcripts
     schedule: "0 0 1 1 0"
     config:
-      data_dir: "./data/qmsum/data"
       per_domain_limit: 10
