@@ -94,18 +94,27 @@ make benchmark
 ## Benchmark
 
 The benchmark scores agent responses against QMSum's gold `specific_query_list`
-answers with **ROUGE-1, ROUGE-2, and ROUGE-L** (precision, recall, f-measure),
-aggregated per-domain and overall. This is exactly the metric reported in the
-QMSum paper for BART / HMNet baselines:
+answers with **ROUGE-1, ROUGE-2, and ROUGE-Lsum** (precision, recall, f-measure),
+aggregated per-domain and overall. ROUGE-Lsum is the summary-level LCS variant
+the QMSum paper reports for BART / HMNet baselines:
 
 - **BART / HMNet** (Zhong et al. 2021): ROUGE-L ≈ 0.20–0.25
 - **GPT-3 / Llama-2** (follow-up papers): ROUGE-L ≈ 0.30–0.40
 
-> **Caveat:** the paper baselines were given gold context. We score full
-> RAG-grounded agent output — the agent has to retrieve the relevant turns
-> from Lobu memory itself. That's a strictly harder task and the numbers
-> reflect it; treat the comparison as apples-to-oranges-ish but useful for
-> sanity-checking whether the agent is in the right ballpark.
+> **Caveats:**
+> 1. Paper baselines were given gold context. We score full RAG-grounded
+>    agent output — the agent has to retrieve the relevant turns from Lobu
+>    memory itself. Strictly harder task; treat comparison as apples-to-
+>    oranges-ish but useful for ballpark sanity-checking.
+> 2. We benchmark only `specific_query_list[]` (per-meeting Q&A), not
+>    `general_query_list[]` (full-meeting summaries). Specific queries are
+>    the more common headline in QMSum follow-up work and what the agent's
+>    citation contract (`[meeting_id turns X–Y]`) is tuned for.
+> 3. Each query is prefaced with `(Meeting context: <meeting_id> — <domain>
+>    domain. Retrieve from this meeting only.)` so retrieval is scoped to
+>    the right transcript. Without this, ambiguous queries like
+>    "Summarize the discussion" would retrieve corpus-wide and tank ROUGE
+>    for reasons unrelated to the agent's quality.
 
 ### Running it
 
@@ -147,8 +156,9 @@ query's response, error, latency, and per-metric scores.
 
 Live runs print an estimated cost based on `queries × ~$0.05/query` (Anthropic
 Sonnet, rough order-of-magnitude). Default `--limit-per-domain 15` produces
-~150–200 queries depending on domain, so budget ~$7–10 for a full run; pass
-`-y` to skip the confirmation prompt.
+~200 queries against QMSum's test split (Academic 6 meetings × ~6q/m, Product
+20 meetings × ~6q/m capped at 15, Committee 6 meetings × ~12q/m), so budget
+~$10 for a full run; pass `-y` to skip the confirmation prompt.
 
 ---
 

@@ -19,10 +19,13 @@ back to val then train — same as connectors/qmsum.connector.ts), take up to
   3. GET    {GATEWAY}/lobu/api/v1/agents/<id>/events   → SSE stream until `complete`
   4. DELETE {GATEWAY}/lobu/api/v1/agents/<id>          → cleanup
 
-Each agent response is scored against the gold `answer` with ROUGE-1/2/L
-(precision, recall, f-measure) via google/rouge-score. We then aggregate
-per-domain and overall means, dump a JSON results file, and pretty-print a
-summary table.
+Each agent response is scored against the gold `answer` with ROUGE-1, ROUGE-2,
+and ROUGE-Lsum (precision, recall, f-measure) via google/rouge-score. ROUGE-Lsum
+is the summary-level variant used in the QMSum paper — LCS computed per-sentence
+and averaged, with sentences split by a naive regex (full English terminators
+are good enough for QMSum gold). We aggregate per-domain and overall means
+(errored queries count as zero — they DROP the mean rather than inflate it),
+dump a JSON results file, and pretty-print a summary table.
 
 Two modes:
 
@@ -53,6 +56,7 @@ import argparse
 import json
 import os
 import random
+import re
 import sys
 import time
 from dataclasses import dataclass, field, asdict
@@ -65,7 +69,7 @@ from rouge_score import rouge_scorer
 
 DOMAINS = ("Academic", "Product", "Committee")
 SPLIT_PREFERENCE = ("test", "val", "train")
-ROUGE_METRICS = ("rouge1", "rouge2", "rougeL")
+ROUGE_METRICS = ("rouge1", "rouge2", "rougeLsum")
 # Rough Anthropic Sonnet pricing as of 2026-05 — order-of-magnitude only,
 # good enough for a "this will cost ~$X" headline before you press enter.
 ESTIMATED_COST_PER_QUERY_USD = 0.05
@@ -146,7 +150,8 @@ def load_cases(
     return cases
 
 
-# ─── Lobu Agent API client (mirrors packages/promptfoo-provider/src/provider.ts) ─
+# ─── Lobu Agent API client (mirrors the gateway protocol in
+#     packages/server/src/gateway public Agent API: POST/POST/GET-SSE/DELETE) ─
 
 
 class LobuAgentClient:
@@ -196,9 +201,15 @@ class LobuAgentClient:
     def collect_response(
         self, session: dict[str, str], message_id: str | None
     ) -> tuple[str, str | None]:
-        """Stream SSE events until 'complete' or 'error'. Returns (text, error)."""
+        """Stream SSE events until 'complete' or 'error'. Returns (text, error).
+
+        Enforces a TOTAL deadline of `self.timeout_s`, not an idle one — requests'
+        `timeout` only fires when the socket is idle, so a chatty gateway that
+        emits tool_use events but never `complete` would otherwise run forever.
+        """
         text: list[str] = []
         err: str | None = None
+        deadline = time.monotonic() + self.timeout_s
         with requests.get(
             f"{session['base']}/events",
             headers={"Authorization": f"Bearer {session['token']}"},
@@ -208,6 +219,8 @@ class LobuAgentClient:
             res.raise_for_status()
             current_event = ""
             for raw_line in res.iter_lines(decode_unicode=True):
+                if time.monotonic() > deadline:
+                    return "".join(text), "timeout"
                 if raw_line is None:
                     continue
                 line = raw_line
@@ -287,8 +300,23 @@ class ScoredResult:
     latency_ms: int = 0
 
 
+# Naive sentence splitter — `rougeLsum` (paper-equivalent ROUGE-L on summaries)
+# is computed per-sentence and averaged, but the scorer expects sentences to
+# already be separated by newlines. NLTK's punkt would be more accurate but
+# pulls a 13MB download on first run; this regex is good enough for QMSum
+# gold answers (full English sentences with clear terminators).
+_SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9\"'(])")
+
+
+def _prepare_for_rouge_lsum(text: str) -> str:
+    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(text.strip()) if s.strip()]
+    return "\n".join(sentences) if sentences else text
+
+
 def score_pair(scorer: rouge_scorer.RougeScorer, gold: str, response: str) -> dict[str, dict[str, float]]:
-    raw = scorer.score(gold, response)
+    # rougeLsum needs newline-separated sentences; rouge1/rouge2 don't care
+    # about newlines, so the same prepared string works for all three.
+    raw = scorer.score(_prepare_for_rouge_lsum(gold), _prepare_for_rouge_lsum(response))
     out: dict[str, dict[str, float]] = {}
     for metric, score in raw.items():
         out[metric] = {
@@ -309,14 +337,18 @@ def aggregate(results: list[ScoredResult]) -> dict[str, Any]:
         return {m: {"precision": 0.0, "recall": 0.0, "fmeasure": 0.0} for m in ROUGE_METRICS}
 
     def aggregate_subset(subset: list[ScoredResult]) -> dict[str, dict[str, float]]:
+        # Errored queries count as zero across every metric so they DROP the
+        # average — otherwise a 50%-error run looks indistinguishable from a
+        # clean one. The summary print + JSON output still surface the error
+        # count separately so it's never hidden.
         if not subset:
             return empty_aggregate()
         agg: dict[str, dict[str, float]] = {}
         for metric in ROUGE_METRICS:
             agg[metric] = {
-                "precision": mean([r.scores.get(metric, {}).get("precision", 0.0) for r in subset if not r.error]),
-                "recall": mean([r.scores.get(metric, {}).get("recall", 0.0) for r in subset if not r.error]),
-                "fmeasure": mean([r.scores.get(metric, {}).get("fmeasure", 0.0) for r in subset if not r.error]),
+                "precision": mean([r.scores.get(metric, {}).get("precision", 0.0) for r in subset]),
+                "recall": mean([r.scores.get(metric, {}).get("recall", 0.0) for r in subset]),
+                "fmeasure": mean([r.scores.get(metric, {}).get("fmeasure", 0.0) for r in subset]),
             }
         return agg
 
@@ -325,13 +357,17 @@ def aggregate(results: list[ScoredResult]) -> dict[str, Any]:
     for domain in DOMAINS:
         subset = [r for r in results if r.domain == domain]
         per_domain[domain] = aggregate_subset(subset)
-        counts["per_domain"][domain] = sum(1 for r in subset if not r.error)
+        counts["per_domain"][domain] = len(subset)
 
     overall = aggregate_subset(results)
     counts["overall"] = {
         "scored": sum(1 for r in results if not r.error),
         "errored": sum(1 for r in results if r.error),
         "total": len(results),
+    }
+    counts["per_domain_errors"] = {
+        domain: sum(1 for r in results if r.domain == domain and r.error)
+        for domain in DOMAINS
     }
     return {"per_domain": per_domain, "overall": overall, "counts": counts}
 
@@ -360,9 +396,9 @@ def print_summary(aggregates: dict[str, Any], elapsed_s: float) -> None:
             f"  {domain:<14} {n:>5} "
             f"{agg['rouge1']['fmeasure']:>8.4f} "
             f"{agg['rouge2']['fmeasure']:>8.4f} "
-            f"{agg['rougeL']['fmeasure']:>8.4f} "
-            f"{agg['rougeL']['precision']:>8.4f} "
-            f"{agg['rougeL']['recall']:>8.4f}"
+            f"{agg['rougeLsum']['fmeasure']:>8.4f} "
+            f"{agg['rougeLsum']['precision']:>8.4f} "
+            f"{agg['rougeLsum']['recall']:>8.4f}"
         )
     overall = aggregates["overall"]
     n = counts["overall"]["scored"]
@@ -371,9 +407,9 @@ def print_summary(aggregates: dict[str, Any], elapsed_s: float) -> None:
         f"  {'OVERALL':<14} {n:>5} "
         f"{overall['rouge1']['fmeasure']:>8.4f} "
         f"{overall['rouge2']['fmeasure']:>8.4f} "
-        f"{overall['rougeL']['fmeasure']:>8.4f} "
-        f"{overall['rougeL']['precision']:>8.4f} "
-        f"{overall['rougeL']['recall']:>8.4f}"
+        f"{overall['rougeLsum']['fmeasure']:>8.4f} "
+        f"{overall['rougeLsum']['precision']:>8.4f} "
+        f"{overall['rougeLsum']['recall']:>8.4f}"
     )
     print()
     print("Baseline reference (QMSum paper, Zhong et al. 2021):")
@@ -385,6 +421,26 @@ def print_summary(aggregates: dict[str, Any], elapsed_s: float) -> None:
 
 
 # ─── Main ───────────────────────────────────────────────────────────────────
+
+
+def _positive_int(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected integer, got {raw!r}") from exc
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"must be >= 1, got {value}")
+    return value
+
+
+def _positive_float(raw: str) -> float:
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"expected number, got {raw!r}") from exc
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be > 0, got {value}")
+    return value
 
 
 def parse_args() -> argparse.Namespace:
@@ -411,9 +467,9 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument(
         "--limit-per-domain",
-        type=int,
-        default=int(os.environ.get("LIMIT_PER_DOMAIN", "15")),
-        help="Max meetings per domain (default: 15)",
+        type=_positive_int,
+        default=_positive_int(os.environ.get("LIMIT_PER_DOMAIN") or "15"),
+        help="Max meetings per domain (default: 15, must be >= 1)",
     )
     p.add_argument(
         "--output",
@@ -422,7 +478,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--random", action="store_true", help="Randomize meeting selection")
     p.add_argument("--seed", type=int, default=1, help="Random seed when --random is set (default: 1)")
-    p.add_argument("--timeout", type=float, default=180.0, help="Per-query SSE timeout in seconds (default: 180)")
+    p.add_argument(
+        "--timeout",
+        type=_positive_float,
+        default=180.0,
+        help="Per-query total SSE deadline in seconds (default: 180)",
+    )
     p.add_argument(
         "--dry-run",
         action="store_true",
@@ -447,7 +508,12 @@ def confirm_cost(num_queries: int, dry_run: bool, yes: bool) -> bool:
     )
     if yes:
         return True
-    answer = input("Continue? [y/N] ").strip().lower()
+    try:
+        answer = input("Continue? [y/N] ").strip().lower()
+    except EOFError:
+        # Non-interactive stdin (CI, piped). Require explicit -y to proceed.
+        print("stdin not a TTY — re-run with --yes / -y to confirm.", file=sys.stderr)
+        return False
     return answer in ("y", "yes")
 
 
@@ -502,12 +568,21 @@ def main() -> int:
     started = time.time()
     for i, case in enumerate(cases, start=1):
         query_start = time.time()
+        # Scope the query to the specific meeting it came from. QMSum gold
+        # answers are per-meeting, so a corpus-wide retrieval ("Summarize the
+        # discussion") would let the agent pick the wrong meeting and tank
+        # ROUGE for reasons unrelated to retrieval quality. The meeting_id is
+        # the canonical filename stem — the connector's metadata.meeting_id.
+        prompt = (
+            f"(Meeting context: {case.meeting_id} — {case.domain} domain. "
+            f"Retrieve from this meeting only.)\n\n{case.query}"
+        )
         if args.dry_run:
             response = case.gold_answer
             error: str | None = None
         else:
             try:
-                response, error = client.ask(case.query, thread=f"qmsum-bench-{i}")  # type: ignore[union-attr]
+                response, error = client.ask(prompt, thread=f"qmsum-bench-{i}")  # type: ignore[union-attr]
             except requests.RequestException as exc:
                 response = ""
                 error = f"http error: {exc}"
@@ -529,7 +604,7 @@ def main() -> int:
                 latency_ms=latency_ms,
             )
         )
-        rl = scores.get("rougeL", {}).get("fmeasure")
+        rl = scores.get("rougeLsum", {}).get("fmeasure")
         status = "ERROR" if error else f"R-L F={rl:.3f}" if rl is not None else "scored"
         print(
             f"  [{i:>3}/{len(cases)}] {case.domain:<10} {case.meeting_id:<14} "
@@ -540,6 +615,7 @@ def main() -> int:
     aggregates = aggregate(results)
 
     output_path = Path(args.output).resolve()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     payload = {
         "config": {
             "gateway": args.gateway,
