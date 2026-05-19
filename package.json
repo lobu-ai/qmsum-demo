@@ -2,23 +2,16 @@
   "name": "qmsum-demo",
   "version": "0.1.0",
   "private": true,
-  "description": "Lobu + promptfoo + QMSum (Yale-LILY meeting summarization) end-to-end demo.",
+  "description": "Lobu + QMSum (Yale-LILY meeting summarization) end-to-end demo with ROUGE-L benchmark.",
   "type": "module",
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "prepare-fixtures": "bun run scripts/prepare-fixtures.ts",
-    "evals": "promptfoo eval -c agents/qmsum/evals/promptfooconfig.yaml",
-    "evals:view": "promptfoo view",
-    "validate:promptfoo": "promptfoo validate -c agents/qmsum/evals/promptfooconfig.yaml"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@lobu/connector-sdk": "^8.0.0",
-    "@lobu/promptfoo-provider": "^0.1.0"
+    "@lobu/connector-sdk": "^8.0.0"
   },
-  "// note": "@lobu/promptfoo-provider is not yet on npm. While it's prepublish, install it from the Lobu monorepo with: `bun add ../lobu/packages/promptfoo-provider` (replace with `bun add @lobu/promptfoo-provider` once published). The version range above is the expected npm range.",
   "devDependencies": {
     "@types/node": "^20.10.0",
-    "promptfoo": "^0.121.0",
     "typescript": "^5.3.3"
   },
   "engines": {
