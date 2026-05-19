@@ -160,12 +160,22 @@ class LobuAgentClient:
         self.token = token
         self.agent = agent
         self.timeout_s = timeout_s
+        # Optional cookie for PGlite/embedded-mode installs where the Agent API's
+        # auth bridge (lobu/gateway.ts:authProvider) only honours a Better Auth
+        # session — not raw PATs. Set LOBU_COOKIE to a full Cookie header value
+        # (e.g. "__Secure-better-auth.session_token=<urlenc>") and create_session
+        # will send it. Subsequent calls use the per-session worker token.
+        self.cookie = os.environ.get("LOBU_COOKIE") or None
 
     def _headers(self, session_token: str | None = None) -> dict[str, str]:
-        return {
+        h = {
             "Content-Type": "application/json",
             "Authorization": f"Bearer {session_token or self.token}",
         }
+        if self.cookie:
+            h["Cookie"] = self.cookie
+            h["Origin"] = self.gateway
+        return h
 
     def create_session(self, thread: str) -> dict[str, str]:
         res = requests.post(
