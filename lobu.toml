@@ -8,10 +8,10 @@
 # Run order (see README.md for the full walkthrough):
 #   1. cp .env.example .env  + fill in keys
 #   2. bun install
-#   3. git clone https://github.com/Yale-LILY/QMSum.git data/qmsum
-#   4. lobu run                   # local gateway + worker
-#   5. lobu apply                 # creates org, entities, connector definition
-#   6. lobu connector run qmsum-transcripts
+#   3. lobu run                   # local gateway + worker
+#   4. lobu apply                 # creates org, entities, connector definition
+#   5. lobu connector run qmsum-transcripts   # self-fetches QMSum from GitHub
+#   6. (optional, only for the eval pipeline) make clone-data
 #   7. bun run prepare-fixtures && bun run evals
 
 [agents.qmsum]

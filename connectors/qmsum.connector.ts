@@ -1,12 +1,16 @@
 /**
  * QMSum meeting-transcript connector.
  *
- * Walks the Yale-LILY QMSum dataset on disk and emits one event per *merged
- * speaking turn* — raw per-turn events are useless because the corpus is full
- * of "Yeah .", "Hmm hmm ." single-word turns that drown the embedding index.
- * Consecutive turns by the same speaker collapse into one event; turn_idx_start
- * and turn_idx_end keep the original indices so gold `relevant_text_span`
- * overlap math still works.
+ * Self-fetches the Yale-LILY QMSum corpus from GitHub via
+ * `fileSystemSourceFromUri` (@lobu/connector-sdk@8) and emits one event per
+ * *merged speaking turn* — raw per-turn events are useless because the
+ * corpus is full of "Yeah .", "Hmm hmm ." single-word turns that drown the
+ * embedding index. Consecutive turns by the same speaker collapse into one
+ * event; turn_idx_start and turn_idx_end keep the original indices so gold
+ * `relevant_text_span` overlap math still works.
+ *
+ * No manual `git clone` step is required — the SDK manages a shallow clone
+ * under `${WORKSPACE_DIR}/.lobu-cache/sources/`.
  *
  * Speaker identity rules (encoded as namespace prefixes so cross-domain
  * collisions can never happen):
@@ -21,18 +25,22 @@
  * `.connector.ts`. Definition key is `qmsum`.
  */
 
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, join, relative, resolve } from "node:path";
-
 import {
   type ActionContext,
   type ActionResult,
   type ConnectorDefinition,
   ConnectorRuntime,
   type EventEnvelope,
+  fileSystemSourceFromUri,
+  type Snapshot,
   type SyncContext,
   type SyncResult,
 } from "@lobu/connector-sdk";
+
+// QMSum is a static research corpus, so we pin the URI at module scope. The
+// SDK does a shallow clone the first time `fetch()` runs and reuses the cache
+// on subsequent syncs.
+const QMSUM_URI = "git+https://github.com/Yale-LILY/QMSum@main";
 
 // ─── Types we read out of QMSum source JSON ────────────────────────────────
 
@@ -62,14 +70,21 @@ interface QmsumFile {
 // ─── Connector config / checkpoint ─────────────────────────────────────────
 
 interface QmsumConfig {
-  data_dir: string;
   per_domain_limit?: number;
 }
 
 interface QmsumCheckpoint {
-  // Each entry is "<domain>::<meeting_id>" — guards against reruns picking up
-  // already-ingested meetings if you bump per_domain_limit later.
+  // Commit SHA captured at the time of the last successful sync. When the
+  // upstream repo's ref is unchanged AND the per-domain cap hasn't been
+  // raised, we short-circuit with zero events.
+  ref?: string;
+  // Each entry is the relative source-file path inside the cloned repo —
+  // guards against reruns picking up already-ingested meetings when the
+  // operator bumps per_domain_limit later.
   seen_meetings: string[];
+  // Cap at the time of the prior sync. If the operator raises it, we ignore
+  // the ref short-circuit because the same commit now exposes more files.
+  per_domain_limit: number;
 }
 
 const DOMAINS = ["Academic", "Product", "Committee"] as const;
@@ -123,45 +138,6 @@ function rangesOverlap(
   return a[0] <= b[1] && b[0] <= a[1];
 }
 
-function safeReadJson(path: string): QmsumFile | null {
-  try {
-    const raw = readFileSync(path, "utf8");
-    return JSON.parse(raw) as QmsumFile;
-  } catch {
-    return null;
-  }
-}
-
-function listJsonFiles(dir: string): string[] {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return [];
-  }
-  return entries
-    .filter((name) => name.endsWith(".json"))
-    .map((name) => join(dir, name))
-    .filter((path) => {
-      try {
-        return statSync(path).isFile();
-      } catch {
-        return false;
-      }
-    })
-    .sort();
-}
-
-function pickSplitDir(domainDir: string): string | null {
-  for (const split of SPLIT_PREFERENCE) {
-    const candidate = join(domainDir, split);
-    const files = listJsonFiles(candidate);
-    if (files.length > 0) return candidate;
-  }
-  // Some QMSum mirrors flatten the splits — fall back to the domain dir.
-  return listJsonFiles(domainDir).length > 0 ? domainDir : null;
-}
-
 interface MergedTurn {
   speaker: string;
   startIdx: number;
@@ -207,12 +183,49 @@ function topicSlugFor(
   return undefined;
 }
 
-function meetingIdFromPath(filePath: string): string {
+function meetingIdFromRelativePath(relativePath: string): string {
   // Canonical QMSum filename without extension (e.g. "Bed003", "ES2004a",
   // "covid_4"). The agent's SOUL.md citation contract — `[meeting_id turns
   // X–Y]` — expects exactly this form, and prepare-fixtures.ts emits the
   // same string, so retrieval round-trips.
-  return basename(filePath, ".json");
+  const base = relativePath.split("/").pop() ?? relativePath;
+  return base.endsWith(".json") ? base.slice(0, -".json".length) : base;
+}
+
+async function collectMatchingFiles(
+  snapshot: Snapshot,
+  glob: string
+): Promise<string[]> {
+  const out: string[] = [];
+  for await (const path of snapshot.walkFiles(glob)) {
+    out.push(path);
+  }
+  // Sort for deterministic per_domain_limit slicing.
+  return out.sort();
+}
+
+async function pickSplitFiles(
+  snapshot: Snapshot,
+  domain: Domain
+): Promise<string[]> {
+  for (const split of SPLIT_PREFERENCE) {
+    const files = await collectMatchingFiles(
+      snapshot,
+      `data/${domain}/${split}/*.json`
+    );
+    if (files.length > 0) return files;
+  }
+  // Some QMSum mirrors flatten the splits — fall back to the domain dir.
+  const flat = await collectMatchingFiles(snapshot, `data/${domain}/*.json`);
+  return flat;
+}
+
+function safeParseJson(raw: string): QmsumFile | null {
+  try {
+    return JSON.parse(raw) as QmsumFile;
+  } catch {
+    return null;
+  }
 }
 
 // ─── Connector class ───────────────────────────────────────────────────────
@@ -222,8 +235,8 @@ export default class QmsumConnector extends ConnectorRuntime {
     key: "qmsum",
     name: "QMSum meeting transcripts",
     description:
-      "Ingests Yale-LILY QMSum meeting transcripts (Academic, Product, Committee) as merged speaking-turn events.",
-    version: "1.0.0",
+      "Ingests Yale-LILY QMSum meeting transcripts (Academic, Product, Committee) as merged speaking-turn events. Self-fetches the corpus from GitHub on first sync — no manual clone required.",
+    version: "2.0.0",
     authSchema: { methods: [{ type: "none" }] },
     feeds: {
       transcripts: {
@@ -233,13 +246,7 @@ export default class QmsumConnector extends ConnectorRuntime {
           "One event per merged speaking turn across Academic / Product / Committee meetings.",
         configSchema: {
           type: "object",
-          required: ["data_dir"],
           properties: {
-            data_dir: {
-              type: "string",
-              description:
-                "Local path to the QMSum `data/` directory (the one containing Academic/Product/Committee subdirs).",
-            },
             per_domain_limit: {
               type: "integer",
               minimum: 1,
@@ -345,8 +352,8 @@ export default class QmsumConnector extends ConnectorRuntime {
         },
       },
     },
-    // Connection-level options are empty — `data_dir` and `per_domain_limit`
-    // live on the `transcripts` feed's `configSchema`. The server's
+    // Connection-level options are empty — `per_domain_limit` lives on the
+    // `transcripts` feed's `configSchema`. The server's
     // `splitConfigByFeedScope` rejects connection-level config whose keys
     // overlap any feed's `configSchema` with the error "Feed-scoped config
     // belongs on feeds."
@@ -358,44 +365,65 @@ export default class QmsumConnector extends ConnectorRuntime {
 
   async sync(ctx: SyncContext): Promise<SyncResult> {
     const config = ctx.config as unknown as QmsumConfig;
-    if (!config?.data_dir) {
-      throw new Error("qmsum: `data_dir` is required");
+    const perDomainLimit = Math.max(1, config?.per_domain_limit ?? 10);
+
+    const prev = ctx.checkpoint as QmsumCheckpoint | null;
+
+    const source = fileSystemSourceFromUri(QMSUM_URI);
+    const snapshot = await source.fetch();
+
+    // Short-circuit when nothing changed AND the operator didn't widen the
+    // per-domain cap. A bumped cap requires a re-walk because the previous
+    // run may have stopped before the now-eligible files.
+    if (
+      prev?.ref === snapshot.ref &&
+      typeof prev.per_domain_limit === "number" &&
+      prev.per_domain_limit >= perDomainLimit
+    ) {
+      return {
+        events: [],
+        checkpoint: { ...prev } as unknown as Record<string, unknown>,
+        metadata: {
+          items_found: 0,
+          meetings_ingested: 0,
+          ref: snapshot.ref,
+          skipped: true,
+          reason: "unchanged-ref",
+        },
+      };
     }
 
-    const dataDir = resolve(config.data_dir);
-    const perDomainLimit = Math.max(1, config.per_domain_limit ?? 10);
-
-    const checkpoint = (ctx.checkpoint as QmsumCheckpoint | null) ?? {
-      seen_meetings: [],
-    };
-    const seen = new Set<string>(checkpoint.seen_meetings ?? []);
-
+    const seen = new Set<string>(prev?.seen_meetings ?? []);
     const events: EventEnvelope[] = [];
     const newlySeen: string[] = [];
 
     for (const domain of DOMAINS) {
-      const domainDir = join(dataDir, domain);
-      const splitDir = pickSplitDir(domainDir);
-      if (!splitDir) continue;
+      const files = (await pickSplitFiles(snapshot, domain)).slice(
+        0,
+        perDomainLimit
+      );
 
-      const files = listJsonFiles(splitDir).slice(0, perDomainLimit);
-      for (const filePath of files) {
-        const meetingId = meetingIdFromPath(filePath);
-        const sourceFileRel = relative(dataDir, filePath);
+      for (const sourceFileRel of files) {
         // Checkpoint key uses the relative source path (not meeting_id) so
         // two QMSum files that share a canonical stem across splits/domains
         // are independently tracked.
-        const seenKey = sourceFileRel;
-        if (seen.has(seenKey)) continue;
+        if (seen.has(sourceFileRel)) continue;
 
-        const data = safeReadJson(filePath);
+        let raw: string;
+        try {
+          raw = await snapshot.readText(sourceFileRel);
+        } catch {
+          continue;
+        }
+        const data = safeParseJson(raw);
         if (!data || !Array.isArray(data.meeting_transcripts)) continue;
 
+        const meetingId = meetingIdFromRelativePath(sourceFileRel);
         const topics = Array.isArray(data.topic_list) ? data.topic_list : [];
         const merged = mergeConsecutive(data.meeting_transcripts);
         if (merged.length === 0) continue;
 
-        const meetingTitle = `${domain} — ${basename(filePath, ".json")}`;
+        const meetingTitle = `${domain} — ${meetingId}`;
         const scope = speakerScopeForDomain(domain);
 
         for (const turn of merged) {
@@ -438,19 +466,24 @@ export default class QmsumConnector extends ConnectorRuntime {
           });
         }
 
-        seen.add(seenKey);
-        newlySeen.push(seenKey);
+        seen.add(sourceFileRel);
+        newlySeen.push(sourceFileRel);
       }
     }
 
+    const nextCheckpoint: QmsumCheckpoint = {
+      ref: snapshot.ref,
+      seen_meetings: [...(prev?.seen_meetings ?? []), ...newlySeen],
+      per_domain_limit: perDomainLimit,
+    };
+
     return {
       events,
-      checkpoint: {
-        seen_meetings: [...(checkpoint.seen_meetings ?? []), ...newlySeen],
-      } as unknown as Record<string, unknown>,
+      checkpoint: nextCheckpoint as unknown as Record<string, unknown>,
       metadata: {
         items_found: events.length,
         meetings_ingested: newlySeen.length,
+        ref: snapshot.ref,
       },
     };
   }

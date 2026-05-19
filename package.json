@@ -12,7 +12,7 @@
     "validate:promptfoo": "promptfoo validate -c agents/qmsum/evals/promptfooconfig.yaml"
   },
   "dependencies": {
-    "@lobu/connector-sdk": "^7.2.0",
+    "@lobu/connector-sdk": "^8.0.0",
     "@lobu/promptfoo-provider": "^0.1.0"
   },
   "// note": "@lobu/promptfoo-provider is not yet on npm. While it's prepublish, install it from the Lobu monorepo with: `bun add ../lobu/packages/promptfoo-provider` (replace with `bun add @lobu/promptfoo-provider` once published). The version range above is the expected npm range.",
