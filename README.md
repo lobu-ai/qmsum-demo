@@ -208,8 +208,9 @@ right now you can't tell why an answer was off.
 
 #### Tier 3 — Model upgrade
 
-Swap `[[agents.qmsum.providers]]` in `lobu.toml` to `claude-sonnet-4-6` or
-`claude-opus-4-7`. RAG-shaped benchmarks like QMSum don't dominate as hard
+Swap the `providers` model in `lobu.config.ts` (the `qmsum` agent already
+defaults to `claude-sonnet-4-6`) to `claude-opus-4-7` or another frontier
+model. RAG-shaped benchmarks like QMSum don't dominate as hard
 as raw-reasoning benchmarks, but a frontier model typically adds **+0.03 to
 +0.08**. Cost goes up ~10–30×; treat as a marketing-headline lever, not a
 default.

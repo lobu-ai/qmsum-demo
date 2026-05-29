@@ -8,9 +8,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@lobu/connector-sdk": "^8.0.0"
+    "@lobu/connector-sdk": "^10.2.0"
   },
   "devDependencies": {
+    "@lobu/cli": "^10.2.0",
     "@types/node": "^20.10.0",
     "typescript": "^5.3.3"
   },
